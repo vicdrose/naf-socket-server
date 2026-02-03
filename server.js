@@ -1,104 +1,71 @@
 const express = require("express");
 const http = require("http");
-const socketIO = require("socket.io");
-const easyrtc = require("open-easyrtc");
 
-// Set process name
-process.title = "naf-easyrtc-server";
-
-// Get port or default to 3000
+process.title = "networked-aframe-server";
 const port = process.env.PORT || 3000;
 
-// Setup Express
 const app = express();
-
-// CORS middleware - CRITICAL for cross-origin requests
-app.use((req, res, next) => {
-  res.header('Access-Control-Allow-Origin', '*');
-  res.header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-  res.header('Access-Control-Allow-Headers', 'Content-Type');
-  next();
-});
-
-// Serve static files if you have any (optional)
-app.use(express.static("public"));
-
-// Health check endpoint
-app.get('/health', (req, res) => {
-  res.json({ status: 'ok', timestamp: new Date().toISOString() });
-});
-
-// Create HTTP server
 const webServer = http.createServer(app);
-
-// Attach Socket.IO with CORS
-const io = socketIO(webServer, {
+const io = require("socket.io")(webServer, {
   cors: {
     origin: "*",
-    methods: ["GET", "POST"],
-    credentials: false
-  },
-  transports: ['websocket', 'polling']
-});
-
-// Configure EasyRTC
-easyrtc.setOption("appIceServers", [
-  {
-    urls: "stun:stun.l.google.com:19302"
-  },
-  {
-    urls: "stun:stun1.l.google.com:19302"
+    methods: ["GET", "POST"]
   }
-]);
+});
 
-easyrtc.setOption("logLevel", "debug");
-easyrtc.setOption("demosEnable", false);
+const rooms = new Map();
 
-// Start EasyRTC
-console.log("🔄 Starting EasyRTC server...");
+io.on("connection", (socket) => {
+  console.log("✅ User connected:", socket.id);
 
-try {
-  const rtc = easyrtc.listen(app, io, null, (err, rtcRef) => {
-    if (err) {
-      console.error("❌ EasyRTC initialization error:", err);
-      process.exit(1);
+  let curRoom = null;
+
+  socket.on("joinRoom", (data) => {
+    const { room } = data;
+    curRoom = room;
+    
+    let roomInfo = rooms.get(room);
+    if (!roomInfo) {
+      roomInfo = { name: room, occupants: {}, occupantsCount: 0 };
+      rooms.set(room, roomInfo);
     }
-    
-    console.log("✅ EasyRTC server initialized");
-    
-    rtcRef.events.on("roomCreate", (appObj, creatorConnectionObj, roomName, roomOptions, callback) => {
-      console.log("🏠 Room created:", roomName);
-      callback(null);
-    });
 
-    rtcRef.events.on("roomJoin", (connectionObj, roomName, roomParameter, callback) => {
-      console.log(`👤 Client ${connectionObj.getEasyrtcid()} joined room: ${roomName}`);
-      callback(null);
-    });
-    
-    rtcRef.events.on("disconnect", (connectionObj, next) => {
-      console.log(`👋 Client ${connectionObj.getEasyrtcid()} disconnected`);
-      next();
-    });
+    const joinedTime = Date.now();
+    roomInfo.occupants[socket.id] = joinedTime;
+    roomInfo.occupantsCount++;
+
+    console.log(`👤 ${socket.id} joined room: ${curRoom}`);
+    socket.join(curRoom);
+
+    socket.emit("connectSuccess", { joinedTime });
+    io.in(curRoom).emit("occupantsChanged", { occupants: roomInfo.occupants });
   });
-} catch (error) {
-  console.error("💥 Fatal error starting EasyRTC:", error);
-  process.exit(1);
-}
 
-// Start server
+  socket.on("send", (data) => {
+    io.to(data.to).emit("send", data);
+  });
+
+  socket.on("broadcast", (data) => {
+    socket.to(curRoom).emit("broadcast", data);
+  });
+
+  socket.on("disconnect", () => {
+    console.log("👋 User disconnected:", socket.id);
+    const roomInfo = rooms.get(curRoom);
+    if (roomInfo) {
+      delete roomInfo.occupants[socket.id];
+      roomInfo.occupantsCount--;
+      socket.to(curRoom).emit("occupantsChanged", { occupants: roomInfo.occupants });
+      
+      if (roomInfo.occupantsCount === 0) {
+        rooms.delete(curRoom);
+      }
+    }
+  });
+});
+
 webServer.listen(port, () => {
-  console.log(`🚀 EasyRTC server listening on port ${port}`);
-  console.log(`📡 Socket.IO ready with CORS enabled`);
-  console.log(`🎮 Server ready for Networked-AFrame connections`);
-  console.log(`🌐 Access at: http://localhost:${port}`);
-});
-
-// Error handlers
-process.on('uncaughtException', (err) => {
-  console.error('💥 Uncaught Exception:', err);
-});
-
-process.on('unhandledRejection', (reason, promise) => {
-  console.error('💥 Unhandled Rejection at:', promise, 'reason:', reason);
+  console.log(`🚀 Server listening on port ${port}`);
+  console.log(`📡 Socket.IO ready`);
+  console.log(`🎮 Ready for Networked-AFrame connections`);
 });
